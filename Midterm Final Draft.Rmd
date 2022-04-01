@@ -1,0 +1,264 @@
+---
+title: "Washington Wizards Shot Analysis"
+subtitle: "Stat 345 Midterm Project"
+font: 12pt
+date: "Due April 1"
+author: "Charlie Handrick"
+output:
+  word_document: default
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+##Packages Used
+library(nbastatR)
+library(ggplot2)
+library(dplyr)
+library(scales)
+library(lubridate)
+library(nbastatR)
+Sys.setenv("VROOM_CONNECTION_SIZE" = 131072 * 2) 
+##Needed to increase VROOM Connection Size for the large dataframes 
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+##Data Loading and Cleaning
+## First DF: Playoff Seasons, needed to load each individually and then bind together
+s1 <- teams_shots(teams = "Washington Wizards", seasons = 2020)
+s2 <- teams_shots(teams = "Washington Wizards", seasons = 2017)
+s3 <- teams_shots(teams = "Washington Wizards", seasons = 2016)
+shot <- rbind(s1,s2,s3)
+##Cleaning first DF
+Playoff <- shot %>% ##I needed to change the values of location x and y to fit the created court
+           mutate(locx = locationX/10, locy = locationY/10+3) %>% 
+           ##I choose to add 3 to y to  keep all hexes on the plot and mostly inbounds
+           mutate( isShotMade = case_when(isShotMade %in% c("FALSE") ~ 0,
+                                 isShotMade %in% c("TRUE") ~ 1)) %>%    select(isShotMade,locx,locy, slugSeason) ## I choose to turn the shot made and missed into numeric to make the fg percentage easier later, then I selected the desired variables.
+
+## Second DF: Current season before and after trading for Kristaps Porzingis
+season <- teams_shots(teams = "Washington Wizards", seasons = 2022)##Loading shot data for current season
+tran <- transactions(include_history = T)##Loading data for transaction history
+##Cleaning/Tidying the data. 
+season$dateGame <- as.Date(season$dateGame, "%Y%m%d")##Changing date from YYYYMMDD to YYYY-MM-DD
+season <- season %>% mutate(date = dateGame) %>% mutate(locx = locationX/10, locy = locationY/10+3) %>% mutate( isShotMade = case_when(isShotMade %in% c("FALSE") ~ 0,isShotMade %in% c("TRUE") ~ 1)) %>% select(isShotMade,locx,locy, date)
+##Yet again I made the same changes to the shot location variables and isShotMade.
+tran <- tran %>% mutate(date = dateTransaction) %>% filter( namePlayer == "Kristaps Porzingis" & nameTeam == "Washington Wizards") %>% select(date,nameTeam, namePlayer)##Selecting only the data desired from the Kristaps change, specifically the date.
+x <- tran$date ##Creating a variable for the date of trade.
+season <- season %>% ##Here I mutate the date variable to before/after the trade by date of game
+  mutate( date = case_when(date <= x ~ 'Before',TRUE ~ 'After'))##This variable will be used to facet the graphic.
+
+###Creating the court##############################
+##Title: Circle Creator
+#Function: Plot circular points for court
+#Input: radius of desired circle and center.
+circle_points = function(center = c(0, 0), radius = 1, npoints = 360) {
+  angles = seq(0, 2 * pi, length.out = npoints)
+  return(tibble(x = center[1] + radius * cos(angles),
+                    y = center[2] + radius * sin(angles)))
+}
+##Dimensions of court in feet#
+##Here I took the dimensions of the court and assigned them to various variables
+##############################
+width = 50 #Width of court
+height = 94 / 2 #Length of court
+key_height = 19 #Distance from baseline to key
+inner_key_width = 12 #Out key width
+outer_key_width = 16 #Inner Key wdith both used to plot key
+backboard_width = 6 #used to make backboard
+backboard_offset = 4 #The backboard is not directly on the out of bounds line
+neck_length = 0.5 ##Neck of Hoop
+hoop_radius = 0.75 ##Radius of the rim itself
+hoop_center_y = backboard_offset + neck_length + hoop_radius ##Calculates center of rim
+three_point_radius = 23.75 ##This is the radius of 3pt line to center of rim.
+three_point_side_radius = 22 ##This is the distance for corner threes
+three_point_side_height = 14 ##Height of threepoint line
+################################################################
+##############Plotting functions################################
+################################################################
+##Title: Perimeter calculation
+#Function: plots the perimeter of the court
+#Input: width and height of court.
+  court_points = tibble(
+    x = c(width / 2, width / 2, -width / 2, -width / 2, width / 2),
+    y = c(height, 0, 0, height, height),
+    desc = "perimeter"
+  )
+#################################################################
+#################################################################
+##Title: Top key creator
+#Function: plots the top of the key
+#Input: outer key width and key height.
+  court_points = bind_rows(court_points , tibble(
+    x = c(outer_key_width / 2, outer_key_width / 2, -outer_key_width / 2, -outer_key_width / 2),
+    y = c(0, key_height, key_height, 0),
+    desc = "outer_key"
+  ))
+##############################################################
+##############################################################
+##Title: Backboard Creator
+#Function: plots the backboard
+#Input: width of backboard and offset length from baseline.
+  court_points = bind_rows(court_points , tibble(
+    x = c(-backboard_width / 2, backboard_width / 2),
+    y = c(backboard_offset, backboard_offset),
+    desc = "backboard"
+  ))
+############################################################## 
+##############################################################
+##Title: Neck of Hoop points
+#Function: plots the neck of the hoop
+#Input: backboard offset and neck length.
+  court_points = bind_rows(court_points , tibble(
+    x = c(0, 0), y = c(backboard_offset, backboard_offset + neck_length), desc = "neck"
+  ))
+##############################################################
+#This top sets the foul circle points using our circle function from earlier.
+  foul_circle = circle_points(center = c(0, key_height), radius = inner_key_width / 2)
+#This mutate sets the points for the top of the circle, which is solid.
+  foul_circle_top = filter(foul_circle, y > key_height) %>%
+    mutate(desc = "foul_circle_top")
+#The below creation mutates the bottom points to create the gaps seen in the paint.
+  foul_circle_bottom = filter(foul_circle, y < key_height) %>%
+    mutate(
+      angle = atan((y - key_height) / x) * 180 / pi,
+      angle_group = floor((angle - 5.625) / 11.25),
+      desc = paste0("foul_circle_bottom_", angle_group)
+    ) %>%
+    filter(angle_group %% 2 == 0) %>%
+    select(x, y, desc)
+###########################################  
+#This uses our circle function again this time to create the rim.
+  hoop = circle_points(center = c(0, hoop_center_y), radius = hoop_radius) %>%
+    mutate(desc = "hoop")
+##This plots the restricted area under the rim, it is a small semi-circle.
+  restricted = circle_points(center = c(0, hoop_center_y), radius = 4) %>%
+    filter(y >= hoop_center_y) %>%
+    mutate(desc = "restricted")
+##This plots the three point line, this is difficult because it extends up form baseline, before arching over.
+  three_point_circle = circle_points(center = c(0, hoop_center_y), radius = three_point_radius) %>%
+    filter(y >= three_point_side_height, y >= hoop_center_y)
+ ##The filter function here allows for the y points to not overlap and creats one singular line
+  three_point_line = tibble(
+    x = c(three_point_side_radius, three_point_side_radius, three_point_circle$x, -three_point_side_radius, -three_point_side_radius),
+    y = c(0, three_point_side_height, three_point_circle$y, three_point_side_height, 0),
+    desc = "three_point_line"
+  )
+##Now we bring all the points into one df by binding the rows.
+  court_points = bind_rows(
+    court_points,
+    foul_circle_top,
+    foul_circle_bottom,
+    hoop,
+    restricted,
+    three_point_line
+  )
+##These 'desc' titles will be useful when we use geompath because it will draw each individually making the court look nicer.
+court_points <- court_points
+```
+
+# First Shot Chart
+
+```{r Chart #1, echo=FALSE, warning=FALSE}
+shot_chart <- ggplot(Playoff, aes(locx, locy, z=isShotMade)) + ##First I plot Shots
+              stat_summary_hex(fun=mean, bins=30, alpha = 0.8) + #Then I bin the shots
+    scale_fill_gradient(low="grey", high="red", labels=percent_format(), name="FG %") + 
+              ##I fill the hexes with the mean of shots made
+              labs(title = "Playoff Seasons", ##Then I add the titles. 
+              subtitle = "Last Three Appearances")+ 
+              geom_path( ##This function plots the court points made prior
+              data = court_points, 
+              aes(x = x, y = y, group = desc),##As said earlier grouping by desc tidys it.
+              color = '#999999', ##I choose this color because its less aggressive than black.
+              inherit.aes = FALSE ) + ##The inherit.aes allows the aes makes this work
+              coord_fixed(ylim = c(0, 45), xlim = c(-25, 25)) + ##Set limits to court size
+              theme_minimal(base_size = 22) + ##Setting ideal base size from graphic
+              theme( ##Creating my own theme to make it look more professional
+              text = element_text(color = '#222222'), ##Seeting text color
+              plot.background = element_rect(fill = 'white', color = 'white'),##Setting both
+              panel.background = element_rect(fill = 'white', color = 'white'),##Bgs to white
+              panel.grid = element_blank(),##The next few lines eliminate all undesired
+              panel.border = element_blank(),##axis titles and borders so its just the court.
+              axis.text = element_blank(),
+              axis.title = element_blank(),
+              axis.ticks = element_blank(),
+              legend.margin = margin(-1, 0, 0, 0, unit = "lines"),
+              legend.key = element_blank(),##Setting more specific legend aspects
+              legend.text = element_text(size = rel(1.0))) +
+              facet_wrap(vars(slugSeason))+#facet by the seasons to get 3 graphs
+              theme(legend.position = "right")#Set legend to righthand side.
+```
+
+```{r echo=FALSE}
+shot_chart ##Calling created graph
+```
+
+## Key Takeaways from Chart
+- High paint scoring leads to success
+- Poor Corner Threes percentages
+- Corner mid range is a weapon of ours
+- Apparent changes in personnel over the years.
+
+### High Percentage Paint Scoring Leads to Success:
+In all three playoff seasons it appears that as a team Washington shot well over 50% from the paint. This means that we were scoring easy buckets which often leads to a higher win rate. The reason we scored so much in the paint can also be the result of out rebounding the other team on offense. Second chance points are usually easier because the defender may still be in the air from the rebound. All in all, it appears that there is some correlation between paint scoring and playoff berth.
+
+### Poor Three Point Shooting from the Corner:
+In all three years our team shot very poorly from the corner. This does not reflect well on our franchise and teams can use this against us in the future. The corner three is often known as the easiest three points in basketball because it is the closest shot from the arch. Improvement in this area can help our team not only make the playoffs, but also have success in it.
+
+### Strong Corner Mid Range Game:
+Unlike our corner three shooting, the mid range from the corner has been a crucial weapon for our team in 2016/2017 and 2019/2020. This shot appears to be a dark red which indicates that we convert these shots at a very high rate. Our play makers in these two seasons felt very good about their ability to shoot from the mid range and it shows in the charts.
+
+### Personell Turnover as Shown in Graphics:
+The major difference that I can spot between the first two seasons (Middle and Left) versus last season is the loss of perennial all-star John Wall. Wall had a devastating drive and passing game. This is why the paint in the first two graphics is darker than the right. Wall would score almost at ease in the paint and it is apparent that our loss of him affected our teams post scoring.
+
+# Second Shot Chart
+
+```{r Chart #2, echo=FALSE, warning=FALSE}
+shot_chart2 <- ggplot(season, aes(locx, locy, z=isShotMade)) + #Plotting the shot data
+              stat_summary_hex(fun=mean, bins=20, alpha = 0.8) + #Binning the same as before
+    scale_fill_gradient(low="grey", high="blue", labels=percent_format(), name="FG %") +##FG% 
+              labs(title = "Shot Chart for the 2021-2022", ##Adding title and subtitle
+              subtitle = "FG% before/after acquiring Porzingis")+ 
+              geom_path( ##Exact same process of plotting the court as above
+              data = court_points,
+              aes(x = x, y = y, group = desc),
+              color = '#999999',
+              inherit.aes = FALSE ) +
+              coord_fixed(ylim = c(0, 45), xlim = c(-25, 25)) +
+              theme_minimal(base_size = 22) +
+              theme(
+              text = element_text(color = '#222222'),
+              plot.background = element_rect(fill = 'white', color = 'white'),
+              panel.background = element_rect(fill = 'white', color = 'white'),
+              panel.grid = element_blank(),
+              panel.border = element_blank(),
+              axis.text = element_blank(),
+              axis.title = element_blank(),
+              axis.ticks = element_blank(),
+              legend.margin = margin(-1, 0, 0, 0, unit = "lines"),
+              legend.key = element_blank(),
+              legend.text = element_text(size = rel(1.0))) +
+              facet_wrap(vars(date))+##Facet data by before and after the desired date.
+              theme(legend.position = "right")##Finally set the legend to the righthand side.
+      
+```
+
+```{r echo=FALSE}
+shot_chart2 ##Calling second plot.
+```
+
+## Key Takeaways from Trade as Show by Graphic:
+* Higher Paint FG%
+* Improved Mid Range FG %
+* Still no improvement in 3pt FG%
+
+### Higher Paint Field Goal Percentage:
+The acquisition of Kristaps Porzingis brought the presence of a Big Man that Washington has not had for years; With him being 7'3 it was apparent that this would be what he brought to our team. Looking at the right graphic before he arrived, there is a sole point right under the rim that stands out to the rest. Now, looking at the left graphic of when he arrived, it is seen that the whole lower paint is that shade earlier but darker. This means that he has made an impact not only with his game down low, but also his play making ability setting up other teammates for easy buckets.
+
+### Improved Mid Range Shooting:
+Kristaps may be tall, but he can also shoot lights out from the mid range. He made an immediate impact to a team that only has one other developed shooter, Bradley Beal. Kristap's best shot arguably is a post up shot from the corner mid range and when looking at the left graphic, that is arguably the highest FG% look that Washington gets. Before he arrived the mid range game was non-existent, but he managed to add a crucial scoring option to the team.
+
+### Lack of Three Point Production:
+The main area that has lacked all year for Washington was not improved by this trade, the three ball. As seen in both graphs, with the exception of a few deep shots, it has been an abysmal season from deep. This is the result of all-star Bradley Beal sustaining a major injury earlier in the year, affecting overall production for him and the team. Kristaps and teammate Kyle Kuzma can shoot well from deep, however their shooting alone cannot make up for the poor shooting of the rest of the team.
